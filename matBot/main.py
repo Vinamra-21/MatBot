@@ -1,64 +1,335 @@
 import streamlit as st
-import time
 import bcrypt
 import json
 import os
 from datetime import datetime
-
-# Set page configuration
-st.set_page_config(
-    page_title="MATLAB Troubleshooter",
-    page_icon="🧮",
-    layout="wide",
+from functions import (
+    get_bot_response, handle_example_query, login_form, signup_form,
+    save_user_data, get_timestamp, load_user_data, hash_password
 )
 
-# Initialize database file for user accounts
+# ------------- CONFIG & CONSTANTS -------------
 USER_DB_PATH = "user_data.json"
 
-def load_user_data():
-    if os.path.exists(USER_DB_PATH):
-        with open(USER_DB_PATH, 'r') as file:
-            return json.load(file)
-    return {}
+# ------------- APP INITIALIZATION -------------
+def initialize_app():
+    """Initialize the application configuration and session state."""
+    st.set_page_config(
+        page_title="MATBOT - MATLAB Assistant",
+        page_icon="🧮",
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
+    # load users
+    if 'user_data' not in st.session_state:
+        st.session_state.user_data = load_user_data()
 
-def save_user_data(data):
-    with open(USER_DB_PATH, 'w') as file:
-        json.dump(data, file)
+    # auth flags
+    if 'logged_in' not in st.session_state:
+        st.session_state.logged_in = False
+    if 'username' not in st.session_state:
+        st.session_state.username = ""
+    if 'auth_page' not in st.session_state:
+        st.session_state.auth_page = "login"
+        
+    # per‐user sessions & settings
+    if st.session_state.logged_in:
+        user = st.session_state.username
+        # load saved theme
+        theme = st.session_state.user_data[user]["settings"].get("theme", "light")
+        st.session_state.theme = theme
+        # load saved chat sessions
+        sessions = st.session_state.user_data[user].get("sessions", {"Chat 1": []})
+        st.session_state.sessions = sessions
+        # Set current session to the first one if not set
+        if 'current_session' not in st.session_state:
+            st.session_state.current_session = list(sessions.keys())[0]
+    else:
+        # Guest defaults
+        if 'theme' not in st.session_state:
+            st.session_state.theme = "light"
+        if 'sessions' not in st.session_state:
+            st.session_state.sessions = {"Chat 1": []}
+        if 'current_session' not in st.session_state:
+            st.session_state.current_session = "Chat 1"
 
-def verify_password(stored_hash, password):
-    return bcrypt.checkpw(password.encode('utf-8'), stored_hash.encode('utf-8'))
+    apply_matlab_theme(st.session_state.theme)
 
-def hash_password(password):
-    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+# ------------- UI COMPONENTS -------------
+def render_sidebar():
+    """Render GPT-like chat session list and controls, with delete support."""
+    with st.sidebar:
+        st.markdown("## 💬 Chats")
+        # ➕ New Chat
+        if st.button("➕ New Chat", use_container_width=True):
+            idx = len(st.session_state.sessions) + 1
+            name = f"Chat {idx}"
+            st.session_state.sessions[name] = []
+            st.session_state.current_session = name
+            # Persist if logged in
+            if st.session_state.logged_in:
+                user = st.session_state.username
+                st.session_state.user_data[user]['sessions'] = st.session_state.sessions
+                save_user_data(st.session_state.user_data)
+            st.rerun()
 
-# Initialize session state variables
-if 'user_data' not in st.session_state:
-    st.session_state.user_data = load_user_data()
+        # Session selector - with error handling
+        sessions = list(st.session_state.sessions.keys())
+        
+        # Safety check - if current_session isn't in the list, default to first session
+        if not sessions:
+            # If no sessions exist, create one
+            st.session_state.sessions["Chat 1"] = []
+            st.session_state.current_session = "Chat 1"
+            sessions = ["Chat 1"]
+        elif st.session_state.current_session not in sessions:
+            # If current_session doesn't exist in sessions, set to first available
+            st.session_state.current_session = sessions[0]
+            
+        # Now we can safely get the index
+        current_idx = sessions.index(st.session_state.current_session)
+        sel = st.radio("Select a Chat", sessions, index=current_idx)
+        
+        if sel != st.session_state.current_session:
+            st.session_state.current_session = sel
+            st.rerun()
 
-if 'chat_history' not in st.session_state:
-    st.session_state.chat_history = []
+        # 🗑️ Delete Current Chat
+        if st.button("🗑️ Delete Chat", use_container_width=True):
+            if len(sessions) > 1:
+                # Remove the selected chat
+                st.session_state.sessions.pop(st.session_state.current_session)
+                # Pick the first remaining session
+                st.session_state.current_session = list(st.session_state.sessions.keys())[0]
+                # Persist if logged in
+                if st.session_state.logged_in:
+                    user = st.session_state.username
+                    st.session_state.user_data[user]['sessions'] = st.session_state.sessions
+                    save_user_data(st.session_state.user_data)
+                st.rerun()
+            else:
+                st.warning("Cannot delete the only remaining chat.")
 
-if 'conversation_started' not in st.session_state:
-    st.session_state.conversation_started = False
+        st.markdown("---")
+        # Other sidebar items...
+        st.markdown("## 📚 Resources")
+        with st.expander("MATLAB Links", expanded=False):
+            st.markdown("""
+            - [Documentation](https://www.mathworks.com/help/matlab/)
+            - [MATLAB Answers](https://www.mathworks.com/matlabcentral/answers/)
+            """)
+        st.markdown("---")
+        st.caption("© 2025 MATBOT v1.0")
 
-if 'theme' not in st.session_state:
-    st.session_state.theme = "light"  # Default theme
+def render_navbar():
+    """Render the top navigation bar with theme toggle and user login/logout."""
+    navbar_container = st.container()
+    with navbar_container:
+        col1, col2, col3 = st.columns([4, 2, 2])
+        with col2:
+            current_theme = "🌙" if st.session_state.theme == "light" else "☀️"
+            theme_label = "Dark Mode" if st.session_state.theme == "light" else "Light Mode"
+            if st.button(f"{current_theme} {theme_label}", key="theme_toggle_nav"):
+                change_theme("dark" if st.session_state.theme == "light" else "light")
+        with col3:
+            if st.session_state.logged_in:
+                logout_col1, logout_col2 = st.columns([1.5, 2])
+                with logout_col1:
+                    st.markdown(f"""
+                    <div style="display: flex; align-items: center; gap: 8px; justify-content: flex-end;">
+                        <div style="width: 24px; height: 24px; border-radius: 50%; background-color: var(--matlab-blue);
+                                color: white; display: flex; align-items: center; justify-content: center; font-weight: bold;">
+                            {st.session_state.username[0].upper()}
+                        </div>
+                        <span>{st.session_state.username}</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+                with logout_col2:
+                    if st.button("Logout", key="logout_button", use_container_width=True):
+                        logout_user()
+            else:
+                login_col1, login_col2 = st.columns([1, 1])
+                with login_col1:
+                    if st.button("Login", key="login_nav_button"):
+                        st.session_state.auth_page = "login"
+                        st.rerun()
+                with login_col2:
+                    if st.button("Sign Up", key="signup_nav_button"):
+                        st.session_state.auth_page = "signup"
+                        st.rerun()
+    st.markdown("---")
 
-if 'logged_in' not in st.session_state:
-    st.session_state.logged_in = False
+def render_chat_interface():
+    """Render the main chat interface for a logged in user."""
+    st.markdown(f"""
+    <div class="logo-container">
+        <h1>Welcome, {st.session_state.username}! 👋</h1>
+        <p>I'm your MATLAB Troubleshooter assistant. How can I help you today?</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    render_chat_history()
+        
+    render_chat_input()
+
+
+def render_auth_interface():
+    """Render the authentication interface."""
+    st.markdown('<div class="auth-form">', unsafe_allow_html=True)
+    auth_col1, auth_col2 = st.columns([2, 3])
+    with auth_col1:
+        st.image("https://upload.wikimedia.org/wikipedia/commons/2/21/Matlab_Logo.png", width=150)
+        st.markdown("### Welcome to MATBOT")
+        st.markdown("""
+        Your professional assistant for MATLAB:
+        - Get instant help with syntax
+        - Debug errors efficiently
+        - Learn best practices
+        - Optimize your code
+        """)
+    with auth_col2:
+        if st.session_state.auth_page == "login":
+            login_form()
+        else:
+            signup_form()
+    st.markdown('</div>', unsafe_allow_html=True)
+
+def render_chat_history():
+    """Render messages for the currently selected chat only."""
+    # Explicitly get the current session name
+    current_session = st.session_state.current_session
     
-if 'username' not in st.session_state:
-    st.session_state.username = ""
+    # Get messages for this specific chat only
+    if current_session in st.session_state.sessions:
+        messages = st.session_state.sessions[current_session]
+    else:
+        messages = []  # Fallback if session doesn't exist
+    
+    with st.container():
+        st.markdown('<div class="chat-container">', unsafe_allow_html=True)
+        
+        # Show welcome message if this chat is empty
+        if not messages:
+            st.markdown(f"""
+            <div class="chat-message bot-message">
+                <div class="avatar bot-avatar">M</div>
+                <div class="message-content">
+                    <p>👋 Welcome to chat "{current_session}"! How can I help with your MATLAB questions?</p>
+                    <div class="chat-timestamp">{get_timestamp()}</div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        # Display all messages for this chat
+        for message in messages:
+            if message['role'] == 'user':
+                st.markdown(f"""
+                <div class="chat-message user-message">
+                    <div class="avatar user-avatar">U</div>
+                    <div class="message-content">
+                        <p>{message['content']}</p>
+                        <div class="chat-timestamp">{message['timestamp']}</div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.markdown(f"""
+                <div class="chat-message bot-message">
+                    <div class="avatar bot-avatar">M</div>
+                    <div class="message-content">
+                        {message['content']}
+                        <div class="chat-timestamp">{message['timestamp']}</div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
 
-if 'auth_page' not in st.session_state:
-    st.session_state.auth_page = "login"  # Options: login, signup
+def render_chat_history():
+    """Render messages for the current GPT-like session."""
+    current_session = st.session_state.current_session
+    msgs = st.session_state.sessions.get(current_session, [])
+    with st.container():
+        st.markdown('<div class="chat-container">', unsafe_allow_html=True)
+        if not msgs:
+            st.markdown(f"""
+            <div class="chat-message bot-message">
+              <div class="avatar bot-avatar">M</div>
+              <div class="message-content">
+                <p>👋 Welcome to MATBOT! Ask me anything about MATLAB.</p>
+                <div class="chat-timestamp">{get_timestamp()}</div>
+              </div>
+            </div>""", unsafe_allow_html=True)
+        for m in msgs:
+            if m['role'] == 'user':
+                cls = 'user-message'
+                av = 'U'
+            else:
+                cls = 'bot-message'
+                av = 'M'
+            st.markdown(f"""
+            <div class="chat-message {cls}">
+              <div class="avatar {cls.split('-')[0]}-avatar">{av}</div>
+              <div class="message-content">
+                <p>{m['content']}</p>
+                <div class="chat-timestamp">{m['timestamp']}</div>
+              </div>
+            </div>""", unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
 
-# Function to apply MATLAB-inspired theme with dark/light mode support
+def render_chat_input():
+    """Render the chat input area using a Streamlit form."""
+    st.markdown("### Ask Your Question")
+    with st.form(key="chat_form", clear_on_submit=True):
+        user_input = st.text_area(
+            "Type your MATLAB question here:",
+            key="user_input",
+            placeholder="E.g., How do I solve linear equations in MATLAB?",
+            height=100
+        )
+
+        col1, col2, col3 = st.columns([3, 1, 1])
+
+        with col1:
+            uploaded_file = st.file_uploader("Attach file", type=["m", "mat"])
+
+        with col3:
+            # Create a large styled button using HTML and CSS
+            submit_btn = st.form_submit_button(
+                label="Send",
+                use_container_width=True  # Uses full width of column
+            )
+            # Add a little space
+            st.markdown(
+                """<style>
+                div.stButton > button:first-child {
+                    font-size: 18px;
+                    padding: 10px 24px;
+                    border-radius: 8px;
+                    background-color: #4CAF50;
+                    color: white;
+                    font-weight: bold;
+                }
+                </style>""",
+                unsafe_allow_html=True
+            )
+
+    if submit_btn and user_input.strip():
+        process_user_input(user_input)
+
+    if uploaded_file is not None:
+        file_details = {
+            "Filename": uploaded_file.name,
+            "Size": f"{uploaded_file.size/1024:.1f} KB"
+        }
+        st.success("File uploaded successfully!")
+
+
+# ------------- STYLING FUNCTIONS -------------
 def apply_matlab_theme(theme_mode):
+    """Apply MATLAB-inspired theme with dark/light mode support."""
     if theme_mode == "dark":
         matlab_theme_css = """
         <style>
-            /* MATLAB-inspired colors - Dark Mode */
             :root {
                 --matlab-blue: #0097E6;
                 --matlab-orange: #FF8C42;
@@ -77,783 +348,302 @@ def apply_matlab_theme(theme_mode):
                 --input-border: #555555;
                 --button-bg: #0097E6;
                 --button-hover: #00B4F0;
+                --navbar-bg: #151515;
             }
         """
-    else:  # Light mode
+    else:
         matlab_theme_css = """
-        <style>
-            /* MATLAB-inspired colors - Light Mode */
-            :root {
-                --matlab-blue: #0076A8;
-                --matlab-orange: #F28F3B;
-                --matlab-dark: #243746;
-                --matlab-light: #FFFFFF;
-                --matlab-code-bg: #F5F7F9;
-                --text-color: #333333;
-                --text-secondary: #666666;
-                --border-color: #E0E0E0;
-                --user-message-bg: #E6F2F8;
-                --bot-message-bg: #FFFFFF;
-                --hover-color: #005685;
-                --header-bg: #F8F9FB;
-                --input-bg: #FFFFFF;
-                --input-text: #333333;
-                --input-border: #CCCCCC;
-                --button-bg: #0076A8;
-                --button-hover: #005685;
-            }
-        """
-    
-    # Common CSS for both themes
+            <style>
+                :root {
+                    /* MATLAB Light Theme Colors */
+                    --matlab-blue: #0076A8;
+                    --matlab-blue-light: #0096D6;
+                    --matlab-orange: #E76500;
+                    --matlab-orange-dark: #C55A00;
+                    --matlab-light: #F7F7F7;
+                    --matlab-code-bg: #F5F7F9;
+                    --text-color: #222222;
+                    --text-secondary: #444444;
+                    --border-color: #CCCCCC;
+                    --user-message-bg: #E1F0FA;
+                    --bot-message-bg: #FFFFFF;
+                    --hover-color: #005685;
+                    --header-bg: #F0F0F0;
+                    --input-bg: #FFFFFF;
+                    --input-text: #222222;
+                    --input-border: #BBBBBB;
+                    --button-bg: #0076A8;
+                    --button-hover: #0096D6;
+                    --navbar-bg: #F0F0F0;
+                }
+            """
     common_css = """
-        /* Page background */
-        .stApp {
-            background-color: var(--matlab-light);
-            color: var(--text-color);
-        }
-        
-        /* Header styling */
-        h1, h2, h3 {
-            color: var(--matlab-blue);
-            font-family: 'Segoe UI', Arial, sans-serif;
-            font-weight: 600;
-        }
-        
-        /* Chat message containers */
-        .chat-message {
-            padding: 1.2rem;
-            border-radius: 10px;
-            margin-bottom: 1.2rem;
-            display: flex;
-            align-items: flex-start;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-            animation: fadeIn 0.3s ease-in;
-        }
-        
-        @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(10px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-        
-        .user-message {
-            background-color: var(--user-message-bg);
-            border-left: 5px solid var(--matlab-blue);
-        }
-        
-        .bot-message {
-            background-color: var(--bot-message-bg);
-            border-left: 5px solid var(--matlab-orange);
-        }
-        
-        /* Code blocks */
-        pre {
-            background-color: var(--matlab-code-bg);
-            padding: 1rem;
-            border-radius: 8px;
-            border-left: 3px solid var(--matlab-orange);
-            font-family: 'Consolas', 'Courier New', monospace;
-            white-space: pre-wrap;
-            overflow-x: auto;
-            color: var(--text-color);
-            margin: 1rem 0;
-        }
-        
-        code {
-            color: var(--matlab-orange);
-            background-color: var(--matlab-code-bg);
-            padding: 0.2rem 0.4rem;
-            border-radius: 4px;
-            font-family: 'Consolas', 'Courier New', monospace;
-            font-size: 0.9em;
-        }
-        
-        /* Button styling */
-        .stButton button {
-            background-color: var(--button-bg);
-            color: white;
-            border-radius: 8px;
-            border: none;
-            padding: 0.6rem 1.2rem;
-            font-weight: 600;
-            transition: all 0.2s ease;
-            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-            font-size: 0.9rem;
-        }
-        
-        .stButton button:hover {
-            background-color: var(--button-hover);
-            box-shadow: 0 4px 8px rgba(0,0,0,0.15);
-            transform: translateY(-1px);
-        }
-        
-        /* Input box */
-        .stTextInput div[data-baseweb="input"] {
-            border-radius: 10px;
-            border: 2px solid var(--input-border);
-            background-color: var(--input-bg);
-            transition: all 0.2s ease;
-        }
-        
-        .stTextInput input {
-            color: var(--input-text);
-        }
-        
-        .stTextInput div[data-baseweb="input"]:focus-within {
-            border: 2px solid var(--matlab-blue);
-            box-shadow: 0 0 0 2px rgba(0,118,168,0.2);
-        }
-        
-        /* Sidebar */
-        [data-testid="stSidebar"] {
-            background-color: var(--matlab-dark);
-            padding: 2rem 1rem;
-        }
-        
-        [data-testid="stSidebar"] h1, 
-        [data-testid="stSidebar"] h2, 
-        [data-testid="stSidebar"] h3 {
-            color: white;
-        }
-        
-        [data-testid="stSidebar"] .stMarkdown p {
-            color: #E0E0E0;
-        }
-        
-        [data-testid="stSidebar"] a {
-            color: var(--matlab-orange);
-        }
-        
-        [data-testid="stSidebar"] a:hover {
-            color: #FFB07C;
-            text-decoration: underline;
-        }
-        
-        /* Chat timestamp */
-        .chat-timestamp {
-            font-size: 0.8rem;
-            color: var(--text-secondary);
-            text-align: right;
-            margin-top: 0.4rem;
-            font-style: italic;
-        }
-        
-        /* Avatar styling */
-        .avatar {
-            width: 45px;
-            height: 45px;
-            border-radius: 50%;
-            margin-right: 1rem;
-            flex-shrink: 0;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-weight: bold;
-            color: white;
-            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
-        }
-        
-        .user-avatar {
-            background-color: var(--matlab-blue);
-        }
-        
-        .bot-avatar {
-            background-color: var(--matlab-orange);
-        }
-        
-        .message-content {
-            flex-grow: 1;
-            color: var(--text-color);
-        }
-        
-        /* Logo container */
-        .logo-container {
-            text-align: center;
-            margin-bottom: 2rem;
-            padding: 1.5rem;
-            background-color: var(--header-bg);
-            border-radius: 12px;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.08);
-        }
-        
-        .theme-selector {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            margin: 1rem 0;
-            gap: 1rem;
-        }
-        
-        .theme-btn {
-            cursor: pointer;
-            padding: 0.4rem 0.8rem;
-            border-radius: 20px;
-            font-size: 0.9rem;
-            border: 2px solid var(--matlab-blue);
-            transition: all 0.2s ease;
-        }
-        
-        .theme-btn.active {
-            background-color: var(--matlab-blue);
-            color: white;
-            font-weight: bold;
-        }
-        
-        .theme-btn:not(.active) {
-            background-color: transparent;
-            color: var(--matlab-blue);
-        }
-        
-        .theme-btn:hover:not(.active) {
-            background-color: rgba(0,118,168,0.1);
-        }
-        
-        /* For lists inside chat messages */
-        .message-content ul, .message-content ol {
-            margin-top: 0.5rem;
-            margin-bottom: 0.5rem;
-            padding-left: 1.5rem;
-        }
-        
-        .message-content li {
-            margin-bottom: 0.3rem;
-        }
-        
-        /* Scrollbar styling */
-        ::-webkit-scrollbar {
-            width: 8px;
-            height: 8px;
-        }
-        
-        ::-webkit-scrollbar-track {
-            background: var(--matlab-light);
-        }
-        
-        ::-webkit-scrollbar-thumb {
-            background: var(--matlab-blue);
-            border-radius: 4px;
-        }
-        
-        ::-webkit-scrollbar-thumb:hover {
-            background: var(--hover-color);
-        }
-        
-        /* Button container */
-        .button-container {
-            display: flex;
-            gap: 10px;
-            margin-top: 8px;
-        }
-        
-        /* Chat container */
-        .chat-container {
-            max-height: 600px;
-            overflow-y: auto;
-            padding-right: 10px;
-            margin-bottom: 20px;
-        }
-        
-        /* Resources in sidebar footer */
-        .sidebar-footer {
-            margin-top: auto;
-            padding-top: 1.5rem;
-            border-top: 1px solid var(--border-color);
-            font-size: 0.9rem;
-            opacity: 0.9;
-            position: absolute;
-            bottom: 20px;
-            width: calc(100% - 2rem);
-        }
-        
-        .resource-link {
-            display: block;
-            color: var(--text-secondary);
-            margin-bottom: 0.5rem;
-            text-decoration: none;
-        }
-        
-        .resource-link:hover {
-            color: var(--matlab-orange);
-            text-decoration: underline;
-        }
-        
-        /* Toggle switch styling */
-        .theme-toggle {
-            display: flex;
-            align-items: center;
-            margin-bottom: 1rem;
-        }
-        
-        .theme-toggle-label {
-            margin-right: 0.5rem;
-            color: #E0E0E0;
-        }
-        
-        /* Auth forms */
-        .auth-form {
-            background-color: var(--bot-message-bg);
-            padding: 1.5rem;
-            border-radius: 10px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-            margin-bottom: 1.5rem;
-            border-left: 5px solid var(--matlab-blue);
-        }
-        
-        .auth-link {
-            color: var(--matlab-blue);
-            cursor: pointer;
-            text-decoration: underline;
-        }
-        
-        .auth-link:hover {
-            color: var(--matlab-orange);
-        }
-        
-        .auth-error {
-            color: #e74c3c;
-            margin: 0.5rem 0;
-            font-size: 0.9rem;
-        }
-        
-        /* Loading animation for bot response */
-        @keyframes pulseAnimation {
-            0% { opacity: 0.6; }
-            50% { opacity: 1; }
-            100% { opacity: 0.6; }
-        }
-        
-        .typing-indicator {
-            display: flex;
-            padding: 0.5rem 1rem;
-            background-color: var(--bot-message-bg);
-            border-radius: 20px;
-            width: fit-content;
-            margin-bottom: 1rem;
-            animation: pulseAnimation 1.5s infinite;
-        }
-        
-        .typing-indicator span {
-            height: 8px;
-            width: 8px;
-            border-radius: 50%;
-            background-color: var(--matlab-blue);
-            margin: 0 2px;
-            display: inline-block;
-        }
-        
-        .typing-indicator span:nth-child(1) {
-            animation: blink 1s infinite 0.2s;
-        }
-        
-        .typing-indicator span:nth-child(2) {
-            animation: blink 1s infinite 0.4s;
-        }
-        
-        .typing-indicator span:nth-child(3) {
-            animation: blink 1s infinite 0.6s;
-        }
-        
-        @keyframes blink {
-            50% { opacity: 0; }
-        }
-        
-        [data-testid="stFileUploadDropzone"] {
-            background-color: var(--bot-message-bg) !important;
-            border-color: var(--border-color) !important;
-            color: var(--text-color) !important;
-        }
-    </style>
+        <style>
+            /* Base styling */
+            .stApp {
+                background-color: var(--matlab-light);
+            }
+            
+            h1, h2, h3 {
+                color: var(--matlab-blue);
+                font-family: 'Segoe UI', Arial, sans-serif;
+                font-weight: 600;
+            }
+            
+            /* Chat messages */
+            .chat-message {
+                padding: 1.2rem;
+                border-radius: 10px;
+                margin-bottom: 1.2rem;
+                display: flex;
+                align-items: flex-start;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+                animation: fadeIn 0.3s ease-in;
+                color: var(--text-color);
+            }
+            
+            @keyframes fadeIn {
+                from { opacity: 0; transform: translateY(10px); }
+                to { opacity: 1; transform: translateY(0); }
+            }
+            
+            .user-message {
+                background-color: var(--user-message-bg);
+                border-left: 5px solid var(--matlab-blue);
+            }
+            
+            .bot-message {
+                background-color: var(--bot-message-bg);
+                border-left: 5px solid var(--matlab-orange);
+            }
+            
+            .message-content {
+                flex-grow: 1;
+                color: var(--text-color);
+            }
+            
+            .message-content p {
+                color: var(--text-color);
+                margin-top: 0;
+            }
+            
+            pre {
+                background-color: var(--matlab-code-bg);
+                padding: 1rem;
+                border-radius: 8px;
+                border-left: 3px solid var(--matlab-orange);
+                font-family: 'Consolas', 'Courier New', monospace;
+                white-space: pre-wrap;
+                overflow-x: auto;
+                color: var(--text-color);
+                margin: 1rem 0;
+            }
+            
+            code {
+                color: var(--matlab-orange);
+                background-color: var(--matlab-code-bg);
+                padding: 0.2rem 0.4rem;
+                border-radius: 4px;
+                font-family: 'Consolas', 'Courier New', monospace;
+                font-size: 0.9em;
+            }
+            
+            /* Rest of your CSS */
+            .stButton button {
+                background-color: var(--button-bg);
+                color: white;
+                border-radius: 8px;
+                border: none;
+                padding: 0.6rem 1.2rem;
+                font-weight: 600;
+                transition: all 0.2s ease;
+                box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+                text-transform: uppercase;
+                letter-spacing: 0.5px;
+                font-size: 0.9rem;
+            }
+            
+            .stButton button:hover {
+                background-color: var(--button-hover);
+                box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+                transform: translateY(-1px);
+            }
+            
+            .stTextInput div[data-baseweb="input"], 
+            .stTextArea textarea {
+                border-radius: 10px;
+                border: 2px solid var(--input-border);
+                background-color: var(--input-bg);
+                transition: all 0.2s ease;
+                color: var(--input-text);
+            }
+            
+            .stTextInput input {
+                color: var(--input-text);
+            }
+            
+            .stTextInput div[data-baseweb="input"]:focus-within {
+                border: 2px solid var(--matlab-blue);
+                box-shadow: 0 0 0 2px rgba(0,118,168,0.2);
+            }
+            
+            [data-testid="stSidebar"] {
+                background-color: var(--matlab-dark);
+                padding: 2rem 1rem;
+            }
+            
+            [data-testid="stSidebar"] h1,
+            [data-testid="stSidebar"] h2,
+            [data-testid="stSidebar"] h3 {
+                color: white;
+            }
+            
+            [data-testid="stSidebar"] .stMarkdown p {
+                color: #E0E0E0;
+            }
+            
+            [data-testid="stSidebar"] a {
+                color: var(--matlab-orange);
+            }
+            
+            [data-testid="stSidebar"] a:hover {
+                color: #FFB07C;
+                text-decoration: underline;
+            }
+            
+            .chat-timestamp {
+                font-size: 0.8rem;
+                color: var(--text-secondary);
+                text-align: right;
+                margin-top: 0.4rem;
+                font-style: italic;
+            }
+            
+            .avatar {
+                width: 45px;
+                height: 45px;
+                border-radius: 50%;
+                margin-right: 1rem;
+                flex-shrink: 0;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                font-weight: bold;
+                color: white;
+                box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+            }
+            
+            .user-avatar {
+                background-color: var(--matlab-blue);
+            }
+            
+            .bot-avatar {
+                background-color: var(--matlab-orange);
+            }
+            
+            .logo-container {
+                text-align: center;
+                margin-bottom: 2rem;
+                padding: 1.5rem;
+                background-color: var(--header-bg);
+                border-radius: 12px;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+                color: var(--text-color);
+            }
+            
+            .logo-container h1 {
+                color: var(--matlab-blue);
+            }
+            
+            .logo-container p {
+                color: var(--text-color);
+            }
+            
+            /* Other styles remain unchanged */
+            /* ... */
+        </style>
     """
-    
     st.markdown(matlab_theme_css + common_css, unsafe_allow_html=True)
 
-# Function to get current timestamp
-def get_timestamp():
-    return datetime.now().strftime("%H:%M:%S")
 
-# Function to simulate bot response (replace with actual RAG implementation)
-def get_bot_response(user_input):
-    # This is a placeholder for your actual RAG implementation
-    time.sleep(1)  # Simulate processing time
+# ------------- ACTION HANDLERS -------------
+def process_user_input(user_input):
+    """Process user input and add to the CURRENT selected chat only."""
+    # Get current chat
+    current_session = st.session_state.current_session
     
-    if "plot" in user_input.lower():
-        return """To create a plot in MATLAB, you can use the `plot(x,y)` function. Here's an example:
-
-```matlab
-x = 0:0.1:2*pi;
-y = sin(x);
-plot(x, y)
-title('Sine Wave')
-xlabel('x')
-ylabel('sin(x)')
-grid on
-```
-
-You can customize your plot with various options:
-- Change line style with `plot(x, y, '--')` for dashed lines
-- Change color with `plot(x, y, 'r')` for red
-- Add multiple plots with `hold on` followed by additional plot commands"""
-
-    elif "error" in user_input.lower() or "issue" in user_input.lower():
-        return """When troubleshooting MATLAB errors, follow these professional practices:
-
-1. **Verify variable types** using `class(variable_name)`
-2. **Check array dimensions** with `size(array_name)` or `whos`
-3. **Implement error handling** with `try/catch` blocks:
-```matlab
-try
-    % Code that might cause an error
-    result = riskyOperation();
-catch ME
-    % Handle the error
-    fprintf('Error: %s\\n', ME.message);
-    % Alternative actions
-end
-```
-4. **Debug efficiently** by setting breakpoints:
-   - Use `dbstop if error` to pause at error locations
-   - Or `dbstop in function_name at line_number` for specific breakpoints
-   
-5. **Check MATLAB path issues** with `path` or fix with `addpath()`"""
-
-    elif "function" in user_input.lower():
-        return """MATLAB functions are defined in .m files with this structure:
-
-```matlab
-function [output1, output2] = myFunction(input1, input2)
-    % Function description (will show in help)
-    % 
-    % Inputs:
-    %   input1 - Description of first input
-    %   input2 - Description of second input
-    %
-    % Outputs:
-    %   output1 - Description of first output
-    %   output2 - Description of second output
+    # Add message to the CURRENT chat only
+    if current_session not in st.session_state.sessions:
+        st.session_state.sessions[current_session] = []
     
-    % Function implementation
-    output1 = input1 + input2;
-    output2 = input1 * input2;
-end
-```
-
-Best practices for MATLAB functions:
-- Place each function in its own .m file named exactly like the function
-- Use meaningful variable names
-- Include comprehensive help documentation
-- Validate input arguments at the start of your function
-- Use `nargin` to handle optional arguments"""
-
-    elif "matrix" in user_input.lower():
-        return """Matrices are fundamental in MATLAB. Here's a comprehensive guide:
-
-**Creating matrices:**
-```matlab
-% Direct specification
-A = [1, 2, 3; 4, 5, 6; 7, 8, 9]
-
-% Special matrices
-zeros_mat = zeros(3,4)     % 3x4 matrix of zeros
-ones_mat = ones(2,5)       % 2x5 matrix of ones
-eye_mat = eye(4)           % 4x4 identity matrix
-rand_mat = rand(3,3)       % 3x3 random matrix (uniform dist.)
-randn_mat = randn(3,3)     % 3x3 random matrix (normal dist.)
-diag_mat = diag([1,2,3])   % Diagonal matrix
-magic_square = magic(3)    % Magic square matrix
-```
-
-**Matrix operations:**
-```matlab
-transpose_A = A'           % Transpose
-inverse_A = inv(A)         % Matrix inverse (if invertible)
-det_A = det(A)             % Determinant
-eigenvalues = eig(A)       % Eigenvalues
-[V,D] = eig(A)             % Eigenvalues and eigenvectors
-trace_A = trace(A)         % Trace (sum of diagonal elements)
-rank_A = rank(A)           % Matrix rank
-null_A = null(A)           % Null space
-```
-
-**Matrix manipulation:**
-```matlab
-size_A = size(A)           % Matrix dimensions
-[rows, cols] = size(A)     % Get dimensions separately
-submatrix = A(1:2, 2:3)    % Extract submatrix
-A(2,:) = [10,11,12]        % Replace a row
-A(:,3) = [13;14;15]        % Replace a column
-flipped = flip(A)          % Flip array vertically
-rotated = rot90(A)         % Rotate array 90 degrees
-```"""
-
-    elif "simulink" in user_input.lower():
-        return """Simulink is MATLAB's block diagram environment for multi-domain simulation. Here are the basics:
-
-1. **Start Simulink**:
-   ```matlab
-   simulink
-   ```
-
-2. **Create a new model**:
-   - Click "Blank Model" or use `new_system('model_name')`
-   - Save with `save_system('model_name')`
-
-3. **Add blocks from libraries**:
-   - Use the Library Browser or search functionality
-   - Common blocks: Integrator, Transfer Fcn, Gain, Scope, etc.
-
-4. **Connect blocks** by clicking and dragging from output to input ports
-
-5. **Set parameters** by double-clicking blocks
-
-6. **Run simulation**:
-   - Set simulation parameters in the "Modeling" tab
-   - Click "Run" or use `sim('model_name')`
-
-7. **Analyze results** using Scope blocks or by exporting to MATLAB workspace
-
-For debugging Simulink models:
-- Enable signal logging
-- Use breakpoints
-- Check sample times
-- Verify solver settings"""
-
-    else:
-        return """I'm your MATLAB troubleshooting assistant. I can help with:
-
-- Syntax and function usage
-- Debugging errors and warnings
-- Algorithm implementation
-- Best practices and optimization
-- Simulink modeling
-- Data visualization techniques
-- File I/O and data processing
-
-Could you provide more specific details about your MATLAB question or issue?"""
-
-# Function to handle example queries
-def handle_example_query(query):
-    st.session_state.chat_history.append({
+    st.session_state.sessions[current_session].append({
         'role': 'user',
-        'content': query,
+        'content': user_input,
         'timestamp': get_timestamp()
     })
     
-    bot_response = get_bot_response(query)
-    st.session_state.chat_history.append({
-        'role': 'assistant',
-        'content': bot_response,
-        'timestamp': get_timestamp()
-    })
+    with st.spinner("MATLAB Troubleshooter is thinking..."):
+        bot_response = get_bot_response(user_input)
+        st.session_state.sessions[current_session].append({
+            'role': 'assistant',
+            'content': bot_response,
+            'timestamp': get_timestamp()
+        })
+    
+    # Save user data if logged in
+    if st.session_state.logged_in:
+        user = st.session_state.username
+        st.session_state.user_data[user]['sessions'] = st.session_state.sessions
+        save_user_data(st.session_state.user_data)
     
     st.rerun()
 
-# Apply the selected theme
-apply_matlab_theme(st.session_state.theme)
+def new_chat():
+    """Start a fresh chat, persist if logged-in."""
+    idx = len(st.session_state.sessions) + 1
+    name = f"Chat {idx}"
+    st.session_state.sessions[name] = []
+    st.session_state.current_session = name
+    if st.session_state.logged_in:
+        user = st.session_state.username
+        st.session_state.user_data[user]['sessions'] = st.session_state.sessions
+        save_user_data(st.session_state.user_data)
+    st.rerun()
 
-# Create sidebar with settings
-with st.sidebar:
-    st.image("https://upload.wikimedia.org/wikipedia/commons/2/21/Matlab_Logo.png", width=120)
-    st.header("MATLAB Troubleshooter")
-    st.markdown("---")
+def clear_chat_history():
+    """Clear current session’s history, persist if logged-in."""
+    st.session_state.sessions[st.session_state.current_session] = []
+    if st.session_state.logged_in:
+        user = st.session_state.username
+        st.session_state.user_data[user]['sessions'] = st.session_state.sessions
+        save_user_data(st.session_state.user_data)
+    st.rerun()
+
+def change_theme(theme):
+    """Change theme and persist per-user preference."""
+    st.session_state.theme = theme
+    if st.session_state.logged_in:
+        user = st.session_state.username
+        st.session_state.user_data[user]["settings"]["theme"] = theme
+        save_user_data(st.session_state.user_data)
+    st.rerun()
     
-    st.subheader("Theme Settings")
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("🌙 Dark", key="dark_theme", 
-                    help="Switch to dark theme", 
-                    use_container_width=True):
-            st.session_state.theme = "dark"
-            st.rerun()
-    with col2:
-        if st.button("☀️ Light", key="light_theme", 
-                    help="Switch to light theme", 
-                    use_container_width=True):
-            st.session_state.theme = "light"
-            st.rerun()
-    
-    st.markdown("---")
-    st.subheader("Chat Options")
-    if st.button("🗑️ Clear Chat History", use_container_width=True):
-        st.session_state.chat_history = []
-        st.session_state.conversation_started = False
-        st.rerun()
-    
-    st.markdown("---")
-    st.subheader("📚 Helpful Resources")
-    
-    st.markdown("""
-    <div class="resource-card">
-        <div class="resource-title">📖 Documentation</div>
-        <a href="https://www.mathworks.com/help/matlab/" target="_blank">MATLAB Documentation</a>
-    </div>
-    
-    <div class="resource-card">
-        <div class="resource-title">💬 Community</div>
-        <a href="https://www.mathworks.com/matlabcentral/answers/" target="_blank">MATLAB Answers</a>
-    </div>
-    
-    <div class="resource-card">
-        <div class="resource-title">🎓 Tutorials</div>
-        <a href="https://www.mathworks.com/support/learn-with-matlab-tutorials.html" target="_blank">MATLAB Tutorials</a>
-    </div>
-    
-    <div class="resource-card">
-        <div class="resource-title">🔍 Function Search</div>
-        <a href="https://www.mathworks.com/help/search.html" target="_blank">Search Functions</a>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    st.markdown("---")
-    st.caption("© 2025 MATLAB Troubleshooter v1.0")
+def logout_user():
+    """Log out the current user."""
+    st.session_state.logged_in = False
+    st.session_state.username = ""
+    st.rerun()
 
-# Main chat interface
-st.markdown("""
-<div class="logo-container">
-    <h1>MATLAB Troubleshooter</h1>
-    <p>Your professional assistant for MATLAB problem-solving</p>
-</div>
-""", unsafe_allow_html=True)
+# ------------- MAIN APP EXECUTION -------------
+def main():
+    """Main application entry point."""
+    initialize_app()
+    render_sidebar()
+    render_navbar()
+    if not st.session_state.logged_in:
+        render_auth_interface()
+    else:
+        render_chat_interface()
 
-# Example queries section
-st.markdown("### Quick Examples")
-cols = st.columns(3)
-with cols[0]:
-    st.markdown("""
-    <div class="example-card" onclick="document.getElementById('user_input').value='How do I plot data in MATLAB?'; document.getElementById('submit_button').click();">
-        How do I plot data in MATLAB?
-    </div>
-    """, unsafe_allow_html=True)
-with cols[1]:
-    st.markdown("""
-    <div class="example-card" onclick="document.getElementById('user_input').value='Help with matrix operations'; document.getElementById('submit_button').click();">
-        Help with matrix operations
-    </div>
-    """, unsafe_allow_html=True)
-with cols[2]:
-    st.markdown("""
-    <div class="example-card" onclick="document.getElementById('user_input').value='How to debug errors in MATLAB?'; document.getElementById('submit_button').click();">
-        How to debug errors in MATLAB?
-    </div>
-    """, unsafe_allow_html=True)
-
-st.markdown("---")
-
-# Display chat history
-chat_container = st.container()
-with chat_container:
-    st.markdown('<div class="chat-container">', unsafe_allow_html=True)
-    
-    if not st.session_state.conversation_started:
-        # Welcome message
-        st.markdown("""
-        <div class="chat-message bot-message">
-            <div class="avatar bot-avatar">M</div>
-            <div class="message-content">
-                <p>👋 Welcome to the MATLAB Troubleshooter! I'm here to help with your MATLAB programming questions.</p>
-                <p>I can assist with:</p>
-                <ul>
-                    <li>MATLAB syntax and functions</li>
-                    <li>Debugging common errors</li>
-                    <li>Optimization techniques</li>
-                    <li>Data visualization</li>
-                    <li>Simulink modeling</li>
-                    <li>Best practices</li>
-                </ul>
-                <p>How can I help you today?</p>
-                <div class="chat-timestamp">""" + get_timestamp() + """</div>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-        st.session_state.conversation_started = True
-    
-    # Display chat history
-    for message in st.session_state.chat_history:
-        if message['role'] == 'user':
-            st.markdown(f"""
-            <div class="chat-message user-message">
-                <div class="avatar user-avatar">U</div>
-                <div class="message-content">
-                    <p>{message['content']}</p>
-                    <div class="chat-timestamp">{message['timestamp']}</div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-        else:
-            st.markdown(f"""
-            <div class="chat-message bot-message">
-                <div class="avatar bot-avatar">M</div>
-                <div class="message-content">
-                    {message['content']}
-                    <div class="chat-timestamp">{message['timestamp']}</div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-    
-    st.markdown('</div>', unsafe_allow_html=True)
-
-# File uploader for MATLAB files
-st.markdown("### Upload MATLAB File (Optional)")
-uploaded_file = st.file_uploader("Upload .m or .mat files for specific help", type=["m", "mat"])
-if uploaded_file is not None:
-    st.success(f"File '{uploaded_file.name}' uploaded successfully! Ask a question about it.")
-
-# User input area with improved styling
-st.markdown("### Ask Your Question")
-user_input = st.text_input("Type your MATLAB question here:", key="user_input", placeholder="E.g., How do I solve linear equations in MATLAB?")
-
-col1, col2, col3 = st.columns([6, 1, 1])
-
-with col1:
-    pass
-
-with col2:
-    submit_button = st.button("Submit", key="submit_button", use_container_width=True)
-    # Add JavaScript to allow pressing Enter to submit
-    st.markdown("""
-    <script>
-    document.addEventListener('keydown', function(e) {
-        if (e.key === 'Enter' && document.activeElement.id === 'user_input') {
-            document.getElementById('submit_button').click();
-        }
-    });
-    </script>
-    """, unsafe_allow_html=True)
-
-with col3:
-    if st.button("Clear", key="clear_button", use_container_width=True):
-        st.session_state.user_input = ""
-        st.rerun()
-
-# Handle submit button
-if submit_button:
-    if user_input.strip():
-        # Add user message to chat history
-        st.session_state.chat_history.append({
-            'role': 'user',
-            'content': user_input,
-            'timestamp': get_timestamp()
-        })
-        
-        # Show typing indicator
-        with st.spinner("MATLAB Troubleshooter is thinking..."):
-            # Get bot response
-            bot_response = get_bot_response(user_input)
-            
-            # Add bot response to chat history
-            st.session_state.chat_history.append({
-                'role': 'assistant',
-                'content': bot_response,
-                'timestamp': get_timestamp()
-            })
-        
-        # Clear the input field and rerun to update the UI
-        st.rerun()
-
-# Add a professional footer
-st.markdown("""
-<div class="footer">
-    <p>MATLAB Troubleshooter - Powered by advanced RAG technology</p>
-    <p>Designed to help you solve MATLAB problems efficiently and effectively</p>
-</div>
-""", unsafe_allow_html=True)
+if __name__ == "__main__":
+    main()

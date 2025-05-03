@@ -120,3 +120,4 @@ def hash_password(password):
 def get_timestamp():
     """Get current timestamp in HH:MM:SS format"""
     return datetime.now().strftime("%H:%M:%S")
+
