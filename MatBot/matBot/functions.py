@@ -10,12 +10,6 @@ USER_DB_PATH = "user_data.json"
 def get_timestamp():
     return datetime.now().strftime("%H:%M:%S")
 
-def get_bot_response(user_input):
-    # This is a placeholder for your actual RAG implementation
-    time.sleep(1)  # Simulate processing time
-    
-    return "hi ! i m runnning"
-
 def handle_example_query(query):
     st.session_state.chat_history.append({
         'role': 'user',
