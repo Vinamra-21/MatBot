@@ -10,22 +10,6 @@ USER_DB_PATH = "user_data.json"
 def get_timestamp():
     return datetime.now().strftime("%H:%M:%S")
 
-def handle_example_query(query):
-    st.session_state.chat_history.append({
-        'role': 'user',
-        'content': query,
-        'timestamp': get_timestamp()
-    })
-    
-    bot_response = get_bot_response(query)
-    st.session_state.chat_history.append({
-        'role': 'assistant',
-        'content': bot_response,
-        'timestamp': get_timestamp()
-    })
-    
-    st.rerun()
-
 def login_form():
     st.markdown("<h2>Login</h2>", unsafe_allow_html=True)
     
