@@ -202,7 +202,7 @@ def search_web(query: str, tavily_api_key: str) -> Dict[str, str]:
 
 # -------------------- Main Function --------------------
 def generate_response(user_query: str, embedding_model=None, vectorstore=None, model_pipeline=None, 
-                      tavily_api_key: str ="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", use_web_search: bool = False) -> str:
+                      tavily_api_key: str ="", use_web_search: bool = False) -> str:
     """
     Generates a response to the user's query.
     Args:
@@ -249,8 +249,8 @@ def generate_response(user_query: str, embedding_model=None, vectorstore=None, m
     return response, used_metadata
 
 # -------------------- Command Line Interface --------------------
-if _name_ == "_main_":
-    tavily_api_key = "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"  # Replace with your API key or use os.getenv()
+if __name__ == "__main__":
+    tavily_api_key = ""  # Replace with your API key or use os.getenv()
     use_web = input("🌐 Use web search? (y/n): ").strip().lower().startswith("y")
 
     # Load models once
