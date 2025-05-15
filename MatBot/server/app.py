@@ -272,4 +272,8 @@ if __name__ == "__main__":
         )
         print("\n🤖 Response:\n", response)
         
+<<<<<<< HEAD
         print("\n📄 Used Metadata:", used_metadata)
+=======
+        print("\n📄 Used Metadata:", used_metadata)
+>>>>>>> 5d317817a5ea15392351f6814d0287bfa4e1fd41
